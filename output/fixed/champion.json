@@ -1,0 +1,94 @@
+{
+  "nodes": [
+    {
+      "id": 0,
+      "kind": "input"
+    },
+    {
+      "id": 1,
+      "kind": "input"
+    },
+    {
+      "id": 2,
+      "kind": "bias"
+    },
+    {
+      "id": 3,
+      "kind": "output"
+    },
+    {
+      "id": 4,
+      "kind": "hidden"
+    },
+    {
+      "id": 5,
+      "kind": "hidden"
+    }
+  ],
+  "genes": [
+    {
+      "innovation": 0,
+      "source": 0,
+      "target": 4,
+      "weight": 2.8890436276922973,
+      "enabled": true
+    },
+    {
+      "innovation": 1,
+      "source": 0,
+      "target": 5,
+      "weight": -3.1750767993457956,
+      "enabled": true
+    },
+    {
+      "innovation": 2,
+      "source": 1,
+      "target": 4,
+      "weight": -3.4331460752215155,
+      "enabled": true
+    },
+    {
+      "innovation": 3,
+      "source": 1,
+      "target": 5,
+      "weight": 2.1570530422495895,
+      "enabled": true
+    },
+    {
+      "innovation": 4,
+      "source": 2,
+      "target": 4,
+      "weight": -0.963245411679791,
+      "enabled": true
+    },
+    {
+      "innovation": 5,
+      "source": 2,
+      "target": 5,
+      "weight": -0.9498388765862986,
+      "enabled": true
+    },
+    {
+      "innovation": 6,
+      "source": 4,
+      "target": 3,
+      "weight": 3.0589578103796153,
+      "enabled": true
+    },
+    {
+      "innovation": 7,
+      "source": 5,
+      "target": 3,
+      "weight": 3.4779499312061675,
+      "enabled": true
+    },
+    {
+      "innovation": 8,
+      "source": 2,
+      "target": 3,
+      "weight": -1.4683949761302184,
+      "enabled": true
+    }
+  ],
+  "fitness": 15.999985945766008
+}
