@@ -13,12 +13,28 @@ from scipy.stats import kstest
 from typing import List, Tuple, Dict, Union, Optional, Callable
 
 from NDP import *
-from optimizers import CMAES
+from optimizers import CMAES, NEAT
+from neat_core import rule_nets
 from utils import dimensions_env, animate_graph, seed_python_numpy_torch_cuda, environment_max_reward
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.autograd.set_grad_enabled(False)
 
+
+
+def make_embryo(config):
+    """Embryo start: inputs -> hidden -> outputs, every node with a self-loop (weights start at 1)."""
+    G = nx.Graph() if config["undirected"] else nx.DiGraph()
+    G.add_nodes_from(range(config["initial_network_size"]))
+    for i in config["input_nodes"]:
+        for h in config["hidden_nodes"]:
+            G.add_edge(i, h, weight=1.0)
+    for h in config["hidden_nodes"]:
+        for o in config["output_nodes"]:
+            G.add_edge(h, o, weight=1.0)
+    for v in list(G.nodes):
+        G.add_edge(v, v, weight=1.0)
+    return G
 
 def env_rollout(G: nx.graph, config: dict, render=False, animate_graph_rollout: bool = False, solution_id: str = None, seed: int = None) -> float:
     if animate_graph_rollout:
@@ -127,7 +143,8 @@ def fitness_functional(config: dict, render=False, animate_graph_growth=False, a
             if config["nb_growth_evals"] > 1:
                 config["seed"] = None
 
-            seed_python_numpy_torch_cuda(config["seed"])
+                if config["optimizer"] != "NEAT":  # NEAT: don't reset Python's random numbers at every evaluation
+                    seed_python_numpy_torch_cuda(config["seed"])
 
             # Define networks
             if config["shared_intial_graph_bool"]:
@@ -136,7 +153,12 @@ def fitness_functional(config: dict, render=False, animate_graph_growth=False, a
                 G = generate_initial_graph(config["initial_network_size"], config["initial_sparsity"], config["binary_connectivity"], config["undirected"], seed=None)
 
             # Initialise the network state
-            if config["coevolve_initial_embeddings"]:
+            if config["optimizer"] == "NEAT":
+                initial_network_state = np.array(evolved_parameters.init_emb, dtype=float).reshape(-1, config["node_embedding_size"])
+            elif config["coevolve_initial_embeddings"] and config.get("initial_graph") == "embryo":
+                # Embryo: one evolved starting embedding per embryo node
+                initial_network_state = np.array(evolved_parameters[: config["nb_params_coevolve_initial_embeddings"]]).reshape(-1, config["node_embedding_size"])
+            elif config["coevolve_initial_embeddings"]:
                 initial_network_state = np.expand_dims(evolved_parameters[: config["node_embedding_size"]], axis=0)
             elif (not config["shared_intial_embedding"]) and config["initial_embeddings_random"]:
                 initial_network_state = np.random.default_rng(None).uniform(-1, +1, (config["initial_network_size"], config["node_embedding_size"]))
@@ -177,37 +199,40 @@ def fitness_functional(config: dict, render=False, animate_graph_growth=False, a
                     bias=config["mlp_weight_values_bias"],
                 )
 
-            # Create indeces for unpaacking the evolved parameters
-            n1 = config["node_embedding_size"] if config["coevolve_initial_embeddings"] else 0
-            n2 = n1 + config["nb_params_growth_model"]
-            n3 = n2 + config["nb_params_feature_transformation"]
-            n4 = n3 + config["nb_params_mlp_weight_values"]
+                if config["optimizer"] == "NEAT":
+                # NEAT: the 3 rules are NEAT networks instead of MLPs filled with evolved numbers
+                    mlp_growth_model, mlp_feature_transformation, mlp_weight_values = rule_nets(evolved_parameters, config)
+                else:
+                # Create indeces for unpaacking the evolved parameters
+                    n1 = config["nb_params_coevolve_initial_embeddings"]  # = embedding size with 1 seed node; more with an embryo
+                    n2 = n1 + config["nb_params_growth_model"]
+                    n3 = n2 + config["nb_params_feature_transformation"]
+                    n4 = n3 + config["nb_params_mlp_weight_values"]
 
-            # Load evolved weights into the growth-decision network
-            torch.nn.utils.vector_to_parameters(torch.tensor(evolved_parameters[n1:n2], dtype=torch.float64, requires_grad=False), mlp_growth_model.parameters())
+                    # Load evolved weights into the growth-decision network
+                    torch.nn.utils.vector_to_parameters(torch.tensor(evolved_parameters[n1:n2], dtype=torch.float64, requires_grad=False), mlp_growth_model.parameters())
 
-            # Load evolved weights into network that updates the node embeddings
-            if config["NN_transform_node_embedding_during_growth"]:
-                torch.nn.utils.vector_to_parameters(
-                    torch.tensor(
-                        evolved_parameters[n2:n3],
-                        dtype=torch.float64,
-                        requires_grad=False,
-                    ),
-                    mlp_feature_transformation.parameters(),
-                )
+                    # Load evolved weights into network that updates the node embeddings
+                    if config["NN_transform_node_embedding_during_growth"]:
+                        torch.nn.utils.vector_to_parameters(
+                            torch.tensor(
+                                evolved_parameters[n2:n3],
+                                dtype=torch.float64,
+                                requires_grad=False,
+                            ),
+                            mlp_feature_transformation.parameters(),
+                        )
 
-            # Load evolved weights into network that dermines weights based on pair of node embeddings for node-based-growth with non-binary connectivity
-            if config["node_based_growth"] and not config["binary_connectivity"]:
-                torch.nn.utils.vector_to_parameters(
-                    torch.tensor(
-                        evolved_parameters[n3:n4],
-                        dtype=torch.float64,
-                        requires_grad=False,
-                    ),
-                    mlp_weight_values.parameters(),
-                )
-
+                    # Load evolved weights into network that dermines weights based on pair of node embeddings for node-based-growth with non-binary connectivity
+                    if config["node_based_growth"] and not config["binary_connectivity"]:
+                        torch.nn.utils.vector_to_parameters(
+                            torch.tensor(
+                                evolved_parameters[n3:n4],
+                                dtype=torch.float64,
+                                requires_grad=False,
+                            ),
+                            mlp_weight_values.parameters(),
+                        )
             network_state = copy.deepcopy(initial_network_state)
             obs_action_dim_tuple = None if "Network" in config["environment"] else (2, 2) if "gate" in config["environment"] else (config["observation_dim"], config["action_dim"])
 
@@ -282,7 +307,10 @@ def fitness_functional(config: dict, render=False, animate_graph_growth=False, a
 
                 # Predict new nodes
                 new_nodes_predictions = predict_new_nodes(mlp_growth_model, embeddings_for_growth_model, config["node_embedding_size"])
-
+                if config.get("initial_graph") == "embryo":
+                    # Embryo: only hidden nodes divide; input and output nodes stay fixed
+                    new_nodes_predictions = np.array(new_nodes_predictions, dtype=bool).reshape(-1)
+                    new_nodes_predictions[config["input_nodes"] + config["output_nodes"]] = False
                 # Add new nodes and increase the network_state vector accordingly
                 G, network_state = add_new_nodes(
                     G=copy.deepcopy(G),
@@ -478,7 +506,9 @@ def bool_gates_fitness(G: nx.Graph, config: dict, render=False, animate_graph_ro
         )
 
         # Select action from the output nodes
-        bool_prediction = np.argmax(network_state[-2:])
+        # Embryo: outputs are the embryo's fixed output nodes (new nodes are added at the end)
+        output_values = network_state[config["output_nodes"]] if config.get("initial_graph") == "embryo" else network_state[-2:]
+        bool_prediction = np.argmax(output_values)
 
         if bool_prediction == Y[idx]:
             fitness += 1
@@ -585,7 +615,14 @@ def train_model(config):
         config["min_network_size"] = observation_dim + action_dim
 
     # Find number of trainable parameters
-    config["nb_params_coevolve_initial_embeddings"] = config["node_embedding_size"] if config["coevolve_initial_embeddings"] else 0
+    # Embryo start (optional): 2 inputs, 1 hidden, 2 outputs
+    if config.get("initial_graph") == "embryo":
+        config["input_nodes"], config["hidden_nodes"], config["output_nodes"] = [0, 1], [2], [3, 4]
+        config["initial_network_size"] = 5
+
+    # Find number of trainable parameters
+    n_start = config["initial_network_size"] if config.get("initial_graph") == "embryo" else 1
+    config["nb_params_coevolve_initial_embeddings"] = config["node_embedding_size"] * n_start if config["coevolve_initial_embeddings"] else 0
 
     config["input_size_growth_model"] = config["node_embedding_size"] * 2 if config["node_pairs_based_growth"] else config["node_embedding_size"]
     mlp_growth_model = MLP(
@@ -631,7 +668,9 @@ def train_model(config):
     print(f"The growth model has {config['nb_trainable_parameters']} trainable parameters")
 
     # Generate initial graph
-    if config["shared_intial_graph_bool"]:
+    if config["shared_intial_graph_bool"] and config.get("initial_graph") == "embryo":
+        config["shared_intial_graph"] = make_embryo(config)
+    elif config["shared_intial_graph_bool"]:
         config["shared_intial_graph"] = generate_initial_graph(config["initial_network_size"], config["initial_sparsity"], config["binary_connectivity"], config["undirected"], config["seed"])
 
     # Generate initial node embedding
@@ -643,9 +682,10 @@ def train_model(config):
     # Run optimiser
     if config["optimizer"] == "CMAES":
         solution_best, solution_centroid, early_stopping_executed, logger = CMAES(config, fitness)
+    elif config["optimizer"] == "NEAT":
+        solution_best, solution_centroid, early_stopping_executed, logger = NEAT(config, fitness)
     else:
         raise NotImplementedError
-
     return solution_best, solution_centroid, early_stopping_executed, logger
 
 

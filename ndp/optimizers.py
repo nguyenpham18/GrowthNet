@@ -131,3 +131,73 @@ def CMAES(config, fitness):
     logger_pd = pd.DataFrame({"pop_best_eval": objectives_best, "mean_eval": objectives_centroid})
 
     return solution_best, solution_centroid, early_stopping_executed, logger_pd
+
+
+
+
+def NEAT(config, fitness):
+    """NEAT in place of CMA-ES. Same inputs and outputs as CMAES(config, fitness).
+    Each individual = 3 NEAT networks (growth, transform, weight) + initial embedding."""
+    import copy
+    import random
+    from neat_core import RULES, InnovationTracker, new_individual, speciate, remove_stagnant, reproduce
+
+    random.seed(config["seed"])
+    np.random.seed(config["seed"])
+    pop_size = config["neat_popsize"]
+    trackers = {k: InnovationTracker() for k in RULES}
+    population = [new_individual(trackers, config["node_embedding_size"], config["nb_params_coevolve_initial_embeddings"])
+                  for _ in range(pop_size)]
+    species = []
+    num_cores = psutil.cpu_count(logical=False) if config["threads"] == -1 else config["threads"]
+
+    print("\n.......................................................")
+    print(f"\nInitialising NEAT with population {pop_size} for {config['neat_generations']} generations")
+    print(f"Using {num_cores} cores\n")
+    tic = time.time()
+
+    best_ever, objectives_best, objectives_mean = None, [], []
+    early_stopping_executed = False
+    for gen in range(config["neat_generations"]):
+        try:
+            # Evaluate (in parallel, like CMAES) with the unchanged NDP fitness function
+            if num_cores > 1:
+                with Pool(num_cores) as pool:
+                    fitvals = pool.map_async(fitness, population).get()
+            else:
+                fitvals = [fitness(ind) for ind in population]
+            for ind, f in zip(population, fitvals):
+                ind.fitness = f
+                for k in RULES:
+                    getattr(ind, k).fitness = f
+
+            gen_best = max(population, key=lambda i: i.fitness)
+            if best_ever is None or gen_best.fitness > best_ever.fitness:
+                best_ever = copy.deepcopy(gen_best)
+            # Log as objectives (negative fitness), the same convention as CMAES
+            objectives_best.append(-gen_best.fitness)
+            objectives_mean.append(-float(np.mean(fitvals)))
+
+            species = remove_stagnant(speciate(population, species, config["neat_species_threshold"]))
+            if gen % config["print_every"] == 0:
+                print(f"Gen {gen:4d} | best fitness {gen_best.fitness:5.2f} | best ever {best_ever.fitness:5.2f} | "
+                      f"mean {np.mean(fitvals):5.2f} | species {len(species):3d} | t {time.time() - tic:6.1f}s")
+            if config.get("neat_stop_when_solved") and best_ever.fitness >= config["neat_solved_fitness"]:
+                print(f"\nGen {gen} | reached fitness {best_ever.fitness}. Stopping.")
+                break
+            population = reproduce(species, pop_size, trackers)
+
+        except KeyboardInterrupt:
+            print(f"\nCaught Ctrl+C!\nStopping evolution\n")
+            break
+
+    toc = time.time()
+    config["training time"] = str(int(toc - tic)) + " seconds"
+    print("\nEvolution took: ", int(toc - tic), " seconds\n")
+    print(f"========Optimizer output:==========================")
+    print(f"Best single loss found was {-best_ever.fitness}")
+    print(f"===================================================\n")
+
+    logger_pd = pd.DataFrame({"pop_best_eval": objectives_best, "mean_eval": objectives_mean})
+    # NEAT has no population centroid, so the best individual is returned in both slots
+    return best_ever, best_ever, early_stopping_executed, logger_pd
