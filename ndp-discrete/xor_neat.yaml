@@ -18,7 +18,8 @@ node_based_growth: True
 node_pairs_based_growth: False
 edge_based_growth: False
 probabilistic_growth: False
-coevolve_initial_embeddings: True
+coevolve_initial_embeddings: True # ignored when node_state is discrete
+node_state: discrete # discrete = node inputs read off the graph (discrete_state.py); latent = original NDP embedding
 
 # Graph model options
 undirected: True

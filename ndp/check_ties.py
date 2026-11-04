@@ -67,7 +67,7 @@ for _ in range(config['number_of_growth_cycles']):
 if len(G) < config['min_network_size']:
     print(f"{len(G)} nodes: too small, their fitness = {len(G) - config['min_network_size']}")
     sys.exit()
-print(f"{len(G)} nodes, {G.number_of_edges()} edges | their fitness = {bool_gates_fitness(G, config)}\n")
+print(f"{len(G)} nodes, {G.number_of_edges()} edges | softmax fitness = {bool_gates_fitness(G, config):.4f} / 4\n")
 
 # ---- Re-run their XOR evaluation loop, printing both outputs (state is not reset between inputs, like theirs)
 W = nx.to_numpy_array(G)

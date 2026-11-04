@@ -146,10 +146,17 @@ def NEAT(config, fitness):
     np.random.seed(config["seed"])
     pop_size = config["neat_popsize"]
     trackers = {k: InnovationTracker() for k in RULES}
-    population = [new_individual(trackers, config["node_embedding_size"], config["nb_params_coevolve_initial_embeddings"])
+    population = [new_individual(trackers, config["neat_rule_shapes"], config["neat_n_init"])
                   for _ in range(pop_size)]
     species = []
     num_cores = psutil.cpu_count(logical=False) if config["threads"] == -1 else config["threads"]
+
+    # Gates are trained on a softmax score that never reaches exactly 4, so "solved" is checked by counting correct answers
+    if "gate" in config["environment"]:
+        from train_backend import fitness_functional
+        solved_score = fitness_functional({**config, "gate_metric": "accuracy"})
+    else:
+        solved_score = lambda ind: ind.fitness
 
     print("\n.......................................................")
     print(f"\nInitialising NEAT with population {pop_size} for {config['neat_generations']} generations")
@@ -182,8 +189,8 @@ def NEAT(config, fitness):
             if gen % config["print_every"] == 0:
                 print(f"Gen {gen:4d} | best fitness {gen_best.fitness:5.2f} | best ever {best_ever.fitness:5.2f} | "
                       f"mean {np.mean(fitvals):5.2f} | species {len(species):3d} | t {time.time() - tic:6.1f}s")
-            if config.get("neat_stop_when_solved") and best_ever.fitness >= config["neat_solved_fitness"]:
-                print(f"\nGen {gen} | reached fitness {best_ever.fitness}. Stopping.")
+            if config.get("neat_stop_when_solved") and solved_score(best_ever) >= config["neat_solved_fitness"]:
+                print(f"\nGen {gen} | best individual is solved ({solved_score(best_ever)}). Stopping.")
                 break
             population = reproduce(species, pop_size, trackers)
 

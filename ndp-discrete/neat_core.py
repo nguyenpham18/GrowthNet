@@ -172,12 +172,11 @@ class Individual:
         self.fitness = 0.0
 
 
-def new_individual(trackers, emb, n_init=None):
-    """n_init = how many starting-embedding numbers (emb for 1 seed node, emb x 5 for the embryo)."""
-    return Individual(minimal_genome(emb + 1, 1, trackers["growth"]),        # +1 = bias input
-                      minimal_genome(emb + 1, emb, trackers["transform"]),
-                      minimal_genome(2 * emb + 1, 1, trackers["weight"]),
-                      [random.uniform(-1, 1) for _ in range(n_init or emb)])  # like x0 ~ U[-1, 1]        # like x0 ~ U[-1, 1]
+def new_individual(trackers, shapes, n_init):
+    """shapes = {rule: (n_in, n_out)} without the bias input. With the discrete node state the
+    "transform" slot is the bias rule. n_init = how many starting-embedding numbers (0 for discrete)."""
+    return Individual(*(minimal_genome(shapes[k][0] + 1, shapes[k][1], trackers[k]) for k in RULES),  # +1 = bias input
+                      [random.uniform(-1, 1) for _ in range(n_init)])  # like x0 ~ U[-1, 1]
 
 
 def rule_nets(ind, config):

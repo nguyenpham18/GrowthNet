@@ -15,6 +15,7 @@ from typing import List, Tuple, Dict, Union, Optional, Callable
 from NDP import *
 from optimizers import CMAES, NEAT
 from neat_core import rule_nets
+from discrete_state import feature_size, grow_discrete, node_biases
 from utils import dimensions_env, animate_graph, seed_python_numpy_torch_cuda, environment_max_reward
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -36,6 +37,52 @@ def make_embryo(config):
         G.add_edge(v, v, weight=1.0)
     return G
 
+
+def discrete_mlps(config):
+    """The 3 MLPs (growth, bias, weight) used with the discrete node state when the optimizer is CMA-ES."""
+    F = feature_size()
+    growth = MLP(F, 1, config["mlp_growth_hidden_layers_dims"], torch.nn.Tanh(), config["growth_model_last_layer_activated"], config["growth_model_bias"])
+    bias = MLP(F, 1, config["mlp_embedding_transform_hidden_layers_dims"], torch.nn.Tanh(), config["transform_model_last_layer_activated"], config["transform_model_bias"])
+    weight = MLP(2 * F, 1, config["mlp_weight_values_hidden_layers_dims"], torch.nn.Tanh(), config["mlp_weight_values_last_layer_activated"], config["mlp_weight_values_bias"])
+    return growth, bias, weight
+
+
+def discrete_rules(evolved_parameters, config):
+    """Growth, bias and weight rules for the discrete node state: NEAT networks, or MLPs filled with CMA-ES parameters."""
+    if config["optimizer"] == "NEAT":
+        return rule_nets(evolved_parameters, config)
+
+    growth, bias, weight = discrete_mlps(config)
+    start = 0
+    for model in (growth, bias, weight):
+        n = sum(p.numel() for p in model.parameters())
+        torch.nn.utils.vector_to_parameters(torch.tensor(evolved_parameters[start : start + n], dtype=torch.float64), model.parameters())
+        start += n
+    return growth, bias, weight
+
+
+def discrete_growth(evolved_parameters, G, config, animate_graph_growth=False):
+    """Grow G with the discrete node state. Returns the graph and its node biases (shown as node labels in animations)."""
+    growth, bias, weight = discrete_rules(evolved_parameters, config)
+    on_step = None
+    if animate_graph_growth:
+        obs_action_dim_tuple = None if "Network" in config["environment"] else (2, 2) if "gate" in config["environment"] else (config["observation_dim"], config["action_dim"])
+
+        def on_step(graph, cycle):
+            animate_graph(
+                G=graph,
+                network_state=node_biases(graph),
+                celluloid_camera=config["celluloid_camera"],
+                layout=config["layout"],
+                arrows=config["arrows"],
+                nodes_role_dims=obs_action_dim_tuple,
+                print_labels=True,
+                growth_cycle=cycle,
+            )
+
+    G = grow_discrete(G, growth, bias, weight, config, on_step=on_step)
+    return G, node_biases(G)
+
 def env_rollout(G: nx.graph, config: dict, render=False, animate_graph_rollout: bool = False, solution_id: str = None, seed: int = None) -> float:
     if animate_graph_rollout:
         graph = copy.deepcopy(G)
@@ -46,6 +93,7 @@ def env_rollout(G: nx.graph, config: dict, render=False, animate_graph_rollout: 
         diameter = int(np.sqrt(len(G)))
         print(f"WARNING: Graph is not connected due to prunning. Diameter manually set to {diameter}.")
     policy_connectivity = nx.to_numpy_array(G)
+    policy_bias = node_biases(G)
 
     # Instatiate the environment
     if render:
@@ -100,6 +148,7 @@ def env_rollout(G: nx.graph, config: dict, render=False, animate_graph_rollout: 
             additive_update=config["additive_update"],
             persistent_observation=persistent_observation,
             feature_transformation_model=None,
+            bias=policy_bias,
         )
 
         # Select action from the output nodes
@@ -152,58 +201,61 @@ def fitness_functional(config: dict, render=False, animate_graph_growth=False, a
             else:
                 G = generate_initial_graph(config["initial_network_size"], config["initial_sparsity"], config["binary_connectivity"], config["undirected"], seed=None)
 
-            # Initialise the network state
-            if config["optimizer"] == "NEAT":
-                initial_network_state = np.array(evolved_parameters.init_emb, dtype=float).reshape(-1, config["node_embedding_size"])
-            elif config["coevolve_initial_embeddings"] and config.get("initial_graph") == "embryo":
-                # Embryo: one evolved starting embedding per embryo node
-                initial_network_state = np.array(evolved_parameters[: config["nb_params_coevolve_initial_embeddings"]]).reshape(-1, config["node_embedding_size"])
-            elif config["coevolve_initial_embeddings"]:
-                initial_network_state = np.expand_dims(evolved_parameters[: config["node_embedding_size"]], axis=0)
-            elif (not config["shared_intial_embedding"]) and config["initial_embeddings_random"]:
-                initial_network_state = np.random.default_rng(None).uniform(-1, +1, (config["initial_network_size"], config["node_embedding_size"]))
-            elif config["shared_intial_embedding"] and config["initial_embeddings_random"]:
-                initial_network_state = config["initial_network_state"]
+            if config.get("node_state") == "discrete":
+                G, network_state = discrete_growth(evolved_parameters, G, config, animate_graph_growth)
             else:
-                initial_network_state = np.ones((config["initial_network_size"], config["node_embedding_size"]))
+                # Initialise the network state
+                if config["optimizer"] == "NEAT":
+                    initial_network_state = np.array(evolved_parameters.init_emb, dtype=float).reshape(-1, config["node_embedding_size"])
+                elif config["coevolve_initial_embeddings"] and config.get("initial_graph") == "embryo":
+                    # Embryo: one evolved starting embedding per embryo node
+                    initial_network_state = np.array(evolved_parameters[: config["nb_params_coevolve_initial_embeddings"]]).reshape(-1, config["node_embedding_size"])
+                elif config["coevolve_initial_embeddings"]:
+                    initial_network_state = np.expand_dims(evolved_parameters[: config["node_embedding_size"]], axis=0)
+                elif (not config["shared_intial_embedding"]) and config["initial_embeddings_random"]:
+                    initial_network_state = np.random.default_rng(None).uniform(-1, +1, (config["initial_network_size"], config["node_embedding_size"]))
+                elif config["shared_intial_embedding"] and config["initial_embeddings_random"]:
+                    initial_network_state = config["initial_network_state"]
+                else:
+                    initial_network_state = np.ones((config["initial_network_size"], config["node_embedding_size"]))
 
-            # Create the growth-decision network
-            mlp_growth_model = MLP(
-                input_dim=config["input_size_growth_model"],
-                output_dim=1,
-                hidden_layers_dims=config["mlp_growth_hidden_layers_dims"],
-                last_layer_activated=config["growth_model_last_layer_activated"],
-                activation=torch.nn.Tanh(),
-                bias=config["growth_model_bias"],
-            )
-
-            # Create the network that transforms node embeddings
-            if config["NN_transform_node_embedding_during_growth"]:
-                mlp_feature_transformation = MLP(
-                    input_dim=config["node_embedding_size"],
-                    output_dim=config["node_embedding_size"],
-                    hidden_layers_dims=config["mlp_embedding_transform_hidden_layers_dims"],
-                    last_layer_activated=config["transform_model_last_layer_activated"],
-                    activation=torch.nn.Tanh(),
-                    bias=config["transform_model_bias"],
-                )
-
-            # Create the network that dermines weights based on pair of node embeddings for node-based-growth with non-binary connectivity
-            if config["node_based_growth"] and not config["binary_connectivity"]:
-                mlp_weight_values = MLP(
-                    input_dim=2 * config["node_embedding_size"],
+                # Create the growth-decision network
+                mlp_growth_model = MLP(
+                    input_dim=config["input_size_growth_model"],
                     output_dim=1,
-                    hidden_layers_dims=config["mlp_weight_values_hidden_layers_dims"],
-                    last_layer_activated=config["mlp_weight_values_last_layer_activated"],
+                    hidden_layers_dims=config["mlp_growth_hidden_layers_dims"],
+                    last_layer_activated=config["growth_model_last_layer_activated"],
                     activation=torch.nn.Tanh(),
-                    bias=config["mlp_weight_values_bias"],
+                    bias=config["growth_model_bias"],
                 )
+
+                # Create the network that transforms node embeddings
+                if config["NN_transform_node_embedding_during_growth"]:
+                    mlp_feature_transformation = MLP(
+                        input_dim=config["node_embedding_size"],
+                        output_dim=config["node_embedding_size"],
+                        hidden_layers_dims=config["mlp_embedding_transform_hidden_layers_dims"],
+                        last_layer_activated=config["transform_model_last_layer_activated"],
+                        activation=torch.nn.Tanh(),
+                        bias=config["transform_model_bias"],
+                    )
+
+                # Create the network that dermines weights based on pair of node embeddings for node-based-growth with non-binary connectivity
+                if config["node_based_growth"] and not config["binary_connectivity"]:
+                    mlp_weight_values = MLP(
+                        input_dim=2 * config["node_embedding_size"],
+                        output_dim=1,
+                        hidden_layers_dims=config["mlp_weight_values_hidden_layers_dims"],
+                        last_layer_activated=config["mlp_weight_values_last_layer_activated"],
+                        activation=torch.nn.Tanh(),
+                        bias=config["mlp_weight_values_bias"],
+                    )
 
                 if config["optimizer"] == "NEAT":
-                # NEAT: the 3 rules are NEAT networks instead of MLPs filled with evolved numbers
+                    # NEAT: the 3 rules are NEAT networks instead of MLPs filled with evolved numbers
                     mlp_growth_model, mlp_feature_transformation, mlp_weight_values = rule_nets(evolved_parameters, config)
                 else:
-                # Create indeces for unpaacking the evolved parameters
+                    # Create indeces for unpaacking the evolved parameters
                     n1 = config["nb_params_coevolve_initial_embeddings"]  # = embedding size with 1 seed node; more with an embryo
                     n2 = n1 + config["nb_params_growth_model"]
                     n3 = n2 + config["nb_params_feature_transformation"]
@@ -233,109 +285,52 @@ def fitness_functional(config: dict, render=False, animate_graph_growth=False, a
                             ),
                             mlp_weight_values.parameters(),
                         )
-            network_state = copy.deepcopy(initial_network_state)
-            obs_action_dim_tuple = None if "Network" in config["environment"] else (2, 2) if "gate" in config["environment"] else (config["observation_dim"], config["action_dim"])
+                network_state = copy.deepcopy(initial_network_state)
+                obs_action_dim_tuple = None if "Network" in config["environment"] else (2, 2) if "gate" in config["environment"] else (config["observation_dim"], config["action_dim"])
 
-            if render or checksum:
-                ns = np.sum(network_state)
-                gs = np.sum(nx.to_numpy_array(G))
-                print(f"\nChecksum of initial network state before growth: {ns}")
-                print(f"Checksum of graph G before growth: {gs}")
-                print(f"The final grown graph has {len(G)} nodes and {len(G.edges)} edges.")
-                config["checksum_best_State_grown"] = ns
-                config["checksum_best_Graph_grown"] = gs
+                if render or checksum:
+                    ns = np.sum(network_state)
+                    gs = np.sum(nx.to_numpy_array(G))
+                    print(f"\nChecksum of initial network state before growth: {ns}")
+                    print(f"Checksum of graph G before growth: {gs}")
+                    print(f"The final grown graph has {len(G)} nodes and {len(G.edges)} edges.")
+                    config["checksum_best_State_grown"] = ns
+                    config["checksum_best_Graph_grown"] = gs
 
-            for growth_cycle_nb in range(config["number_of_growth_cycles"]):
-                # Draw the graph
+                for growth_cycle_nb in range(config["number_of_growth_cycles"]):
+                    # Draw the graph
 
-                if animate_graph_growth and growth_cycle_nb == 0:
-                    animate_graph(
-                        G=G,
+                    if animate_graph_growth and growth_cycle_nb == 0:
+                        animate_graph(
+                            G=G,
+                            network_state=network_state,
+                            celluloid_camera=config["celluloid_camera"],
+                            layout=config["layout"],
+                            arrows=config["arrows"],
+                            nodes_role_dims=obs_action_dim_tuple,
+                            print_labels=True,
+                            growth_cycle=growth_cycle_nb,
+                        )
+
+                    # Define network thinking time based on its current diameter
+                    try:
+                        diameter = nx.diameter(G.to_undirected())
+                    except:
+                        diameter = int(np.sqrt(len(G)))
+                        print(f"\nWARNING: Graph is not connected due to prunning. Diameter manually set to {diameter}.")
+                    network_thinking_time = diameter + config["network_thinking_time_extra_growth"]
+
+                    # Local propagation of node features — i.e thinking time
+                    network_state = propagate_features(
                         network_state=network_state,
-                        celluloid_camera=config["celluloid_camera"],
-                        layout=config["layout"],
-                        arrows=config["arrows"],
-                        nodes_role_dims=obs_action_dim_tuple,
-                        print_labels=True,
-                        growth_cycle=growth_cycle_nb,
-                    )
-
-                # Define network thinking time based on its current diameter
-                try:
-                    diameter = nx.diameter(G.to_undirected())
-                except:
-                    diameter = int(np.sqrt(len(G)))
-                    print(f"\nWARNING: Graph is not connected due to prunning. Diameter manually set to {diameter}.")
-                network_thinking_time = diameter + config["network_thinking_time_extra_growth"]
-
-                # Local propagation of node features — i.e thinking time
-                network_state = propagate_features(
-                    network_state=network_state,
-                    W=nx.to_numpy_array(G),
-                    network_thinking_time=network_thinking_time,
-                    recurrent_activation_function=config["recurrent_activation_function"],
-                    additive_update=config["additive_update"],
-                    persistent_observation=None,
-                    feature_transformation_model=mlp_feature_transformation if config["NN_transform_node_embedding_during_growth"] else None,
-                )
-
-                if animate_graph_growth:
-                    animate_graph(
-                        G=G,
-                        network_state=network_state,
-                        celluloid_camera=config["celluloid_camera"],
-                        layout=config["layout"],
-                        arrows=config["arrows"],
-                        nodes_role_dims=obs_action_dim_tuple,
-                        print_labels=True,
-                        growth_cycle=growth_cycle_nb,
-                    )
-
-                # Query node/edges embeddings
-                if config["node_pairs_based_growth"]:
-                    # Query pairs of node embeddings
-                    node_embeddings_concatenated_dict, embeddings_for_growth_model = query_pairs_of_node_embeddings(
                         W=nx.to_numpy_array(G),
-                        network_state=network_state,
-                        self_link_allowed=config["self_link_allowed_during_querying"],
-                    )
-                elif config["node_based_growth"]:
-                    embeddings_for_growth_model = network_state
-                    node_embeddings_concatenated_dict = None
-                elif config["edge_based_growth"]:
-                    raise NotImplementedError
-
-                # Predict new nodes
-                new_nodes_predictions = predict_new_nodes(mlp_growth_model, embeddings_for_growth_model, config["node_embedding_size"])
-                if config.get("initial_graph") == "embryo":
-                    # Embryo: only hidden nodes divide; input and output nodes stay fixed
-                    new_nodes_predictions = np.array(new_nodes_predictions, dtype=bool).reshape(-1)
-                    new_nodes_predictions[config["input_nodes"] + config["output_nodes"]] = False
-                # Add new nodes and increase the network_state vector accordingly
-                G, network_state = add_new_nodes(
-                    G=copy.deepcopy(G),
-                    config=config,
-                    network_state=network_state,
-                    node_embeddings_concatenated_dict=node_embeddings_concatenated_dict,
-                    new_nodes_predictions=new_nodes_predictions,
-                    node_based_growth=config["node_based_growth"],
-                    node_pairs_based_growth=config["node_pairs_based_growth"],
-                )
-
-                if animate_graph_growth:
-                    animate_graph(
-                        G=G,
-                        network_state=network_state,
-                        celluloid_camera=config["celluloid_camera"],
-                        layout=config["layout"],
-                        arrows=config["arrows"],
-                        nodes_role_dims=obs_action_dim_tuple,
-                        print_labels=True,
-                        growth_cycle=growth_cycle_nb,
+                        network_thinking_time=network_thinking_time,
+                        recurrent_activation_function=config["recurrent_activation_function"],
+                        additive_update=config["additive_update"],
+                        persistent_observation=None,
+                        feature_transformation_model=mlp_feature_transformation if config["NN_transform_node_embedding_during_growth"] else None,
                     )
 
-                if len(G) > 1 and not config["binary_connectivity"]:
-                    G = update_weights(G=G, network_state=network_state, model=mlp_weight_values, config=config)
                     if animate_graph_growth:
                         animate_graph(
                             G=G,
@@ -348,9 +343,37 @@ def fitness_functional(config: dict, render=False, animate_graph_growth=False, a
                             growth_cycle=growth_cycle_nb,
                         )
 
-                if config["prunning_phase"]:
-                    edges_to_be_removed = [(a, b) for a, b, attrs in G.edges(data=True) if abs(attrs["weight"]) <= config["prunning_threshold"]]
-                    G.remove_edges_from(edges_to_be_removed)
+                    # Query node/edges embeddings
+                    if config["node_pairs_based_growth"]:
+                        # Query pairs of node embeddings
+                        node_embeddings_concatenated_dict, embeddings_for_growth_model = query_pairs_of_node_embeddings(
+                            W=nx.to_numpy_array(G),
+                            network_state=network_state,
+                            self_link_allowed=config["self_link_allowed_during_querying"],
+                        )
+                    elif config["node_based_growth"]:
+                        embeddings_for_growth_model = network_state
+                        node_embeddings_concatenated_dict = None
+                    elif config["edge_based_growth"]:
+                        raise NotImplementedError
+
+                    # Predict new nodes
+                    new_nodes_predictions = predict_new_nodes(mlp_growth_model, embeddings_for_growth_model, config["node_embedding_size"])
+                    if config.get("initial_graph") == "embryo":
+                        # Embryo: only hidden nodes divide; input and output nodes stay fixed
+                        new_nodes_predictions = np.array(new_nodes_predictions, dtype=bool).reshape(-1)
+                        new_nodes_predictions[config["input_nodes"] + config["output_nodes"]] = False
+                    # Add new nodes and increase the network_state vector accordingly
+                    G, network_state = add_new_nodes(
+                        G=copy.deepcopy(G),
+                        config=config,
+                        network_state=network_state,
+                        node_embeddings_concatenated_dict=node_embeddings_concatenated_dict,
+                        new_nodes_predictions=new_nodes_predictions,
+                        node_based_growth=config["node_based_growth"],
+                        node_pairs_based_growth=config["node_pairs_based_growth"],
+                    )
+
                     if animate_graph_growth:
                         animate_graph(
                             G=G,
@@ -362,6 +385,35 @@ def fitness_functional(config: dict, render=False, animate_graph_growth=False, a
                             print_labels=True,
                             growth_cycle=growth_cycle_nb,
                         )
+
+                    if len(G) > 1 and not config["binary_connectivity"]:
+                        G = update_weights(G=G, network_state=network_state, model=mlp_weight_values, config=config)
+                        if animate_graph_growth:
+                            animate_graph(
+                                G=G,
+                                network_state=network_state,
+                                celluloid_camera=config["celluloid_camera"],
+                                layout=config["layout"],
+                                arrows=config["arrows"],
+                                nodes_role_dims=obs_action_dim_tuple,
+                                print_labels=True,
+                                growth_cycle=growth_cycle_nb,
+                            )
+
+                    if config["prunning_phase"]:
+                        edges_to_be_removed = [(a, b) for a, b, attrs in G.edges(data=True) if abs(attrs["weight"]) <= config["prunning_threshold"]]
+                        G.remove_edges_from(edges_to_be_removed)
+                        if animate_graph_growth:
+                            animate_graph(
+                                G=G,
+                                network_state=network_state,
+                                celluloid_camera=config["celluloid_camera"],
+                                layout=config["layout"],
+                                arrows=config["arrows"],
+                                nodes_role_dims=obs_action_dim_tuple,
+                                print_labels=True,
+                                growth_cycle=growth_cycle_nb,
+                            )
 
             if render or checksum:
                 ns = np.sum(network_state)
@@ -438,7 +490,9 @@ def fitness_functional(config: dict, render=False, animate_graph_growth=False, a
 
 def bool_gates_fitness(G: nx.Graph, config: dict, render=False, animate_graph_rollout: bool = False):
     """
-    Returns a scalar measure of how many elements of the boolean gate truth table are correctly predicted by the graph G.
+    Scores the graph G on the boolean gate truth table.
+    Default: sum over the 4 inputs of the softmax probability given to the correct output (ties earn 0.5, not a free point).
+    config["gate_metric"] == "accuracy": number of inputs where the correct output is bigger by more than 1e-6 (ties are wrong).
     """
     # Truth table
     if config["environment"] == "XOR_gate":
@@ -469,11 +523,13 @@ def bool_gates_fitness(G: nx.Graph, config: dict, render=False, animate_graph_ro
         diameter = int(np.sqrt(len(G)))
         print(f"WARNING: Graph is not connected due to prunning. Diameter manually set to {diameter}.")
     policy_connectivity = nx.to_numpy_array(G)
+    policy_bias = node_biases(G)
 
     network_state = np.zeros(policy_connectivity.shape[0])
     network_thinking_time = diameter + config["network_thinking_time_extra_rollout"]
     timestep = 0
-    fitness = 0
+    softmax_score = 0
+    accuracy = 0
     for idx, x in enumerate(X):
         # Visualise the network's information flow
         if animate_graph_rollout:
@@ -503,21 +559,22 @@ def bool_gates_fitness(G: nx.Graph, config: dict, render=False, animate_graph_ro
             additive_update=config["additive_update"],
             persistent_observation=persistent_observation,
             feature_transformation_model=None,
+            bias=policy_bias,
         )
 
         # Select action from the output nodes
         # Embryo: outputs are the embryo's fixed output nodes (new nodes are added at the end)
         output_values = network_state[config["output_nodes"]] if config.get("initial_graph") == "embryo" else network_state[-2:]
-        bool_prediction = np.argmax(output_values)
-
-        if bool_prediction == Y[idx]:
-            fitness += 1
+        probabilities = np.exp(output_values - np.max(output_values))
+        probabilities /= probabilities.sum()
+        softmax_score += probabilities[Y[idx]]
+        accuracy += output_values[Y[idx]] - output_values[1 - Y[idx]] > 1e-6
 
         timestep += 1
 
     if render:
-        print(f"{config['environment']} gate fitness: {fitness}")
-    return fitness
+        print(f"{config['environment']} gate softmax score: {softmax_score:.4f} / 4 | correct (ties count as wrong): {accuracy} / 4")
+    return accuracy if config.get("gate_metric") == "accuracy" else softmax_score
 
 
 def small_world_ness_fitness(G: nx.Graph, niter=5, nrand=10, seed=None, sigma=True, omega=False, render=False):
@@ -665,6 +722,18 @@ def train_model(config):
     config["nb_trainable_parameters"] = (
         config["nb_params_coevolve_initial_embeddings"] + config["nb_params_growth_model"] + config["nb_params_feature_transformation"] + config["nb_params_mlp_weight_values"]
     )
+
+    # (inputs, outputs) of each NEAT rule network, bias input not included
+    if config.get("node_state") == "discrete":
+        F = feature_size()
+        config["nb_params_coevolve_initial_embeddings"] = 0
+        config["nb_trainable_parameters"] = sum(p.numel() for m in discrete_mlps(config) for p in m.parameters())
+        config["neat_rule_shapes"] = {"growth": (F, 1), "transform": (F, 1), "weight": (2 * F, 1)}
+        config["neat_n_init"] = 0
+    else:
+        emb = config["node_embedding_size"]
+        config["neat_rule_shapes"] = {"growth": (config["input_size_growth_model"], 1), "transform": (emb, emb), "weight": (2 * emb, 1)}
+        config["neat_n_init"] = config["nb_params_coevolve_initial_embeddings"] or emb
     print(f"The growth model has {config['nb_trainable_parameters']} trainable parameters")
 
     # Generate initial graph

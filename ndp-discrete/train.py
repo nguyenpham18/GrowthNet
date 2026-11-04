@@ -75,8 +75,8 @@ def train(config):
             fitness = fitness_functional(config, render=True, solution_id="best")
             fitness(solution_best)
             print(f"\nRunning environment for centroid solution...")
-            print(f"\nRunning environment for centroid solution...")
             fitness = fitness_functional(config, render=True, solution_id="centroid")
+            fitness(solution_centroid)
 
         print(f"\nBYE! - ID: {config['id']}")
 

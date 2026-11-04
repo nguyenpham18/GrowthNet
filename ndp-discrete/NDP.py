@@ -79,6 +79,7 @@ def propagate_features(
     additive_update: bool,
     persistent_observation: np.array = None,
     feature_transformation_model=None,
+    bias: np.array = None,
 ):
     """
     Propagate the network state through the network.
@@ -90,6 +91,7 @@ def propagate_features(
         recurrent_activation_function (str)): activation function to use for network state propagation
         additive_update (bool): whether to use additive update or not
         persistent_observation (np.array) : observation array
+        bias (np.array, optional): per-node bias added before the activation (discrete node state)
 
     Returns:
         np.array: the updated network state
@@ -98,6 +100,7 @@ def propagate_features(
         network_state = torch.tensor(network_state, dtype=torch.float64)
         persistent_observation = torch.tensor(persistent_observation, dtype=torch.float64) if persistent_observation is not None else None
         W = torch.tensor(W, dtype=torch.float64)
+        bias = torch.tensor(bias, dtype=torch.float64) if bias is not None else None
 
         if recurrent_activation_function is None:
             activation = None
@@ -111,6 +114,8 @@ def propagate_features(
                 network_state += W.T @ network_state
             else:
                 network_state = W.T @ network_state
+            if bias is not None:
+                network_state = network_state + bias
 
             if feature_transformation_model is not None:
                 network_state = feature_transformation_model(network_state)

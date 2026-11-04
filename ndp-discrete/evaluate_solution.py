@@ -13,12 +13,12 @@ if __name__ == "__main__":
     parser.add_argument("--rollouts", type=int, default=1, metavar="", help="Number of evaluation rollouts")
     parser.add_argument(
         "--random_seed",
-        type=bool,
+        type=int,
         default=0,
         metavar="",
         help="If true, it uses a new seed different from training. This makes initial embeddings random at each evaluation if shared option was set to False.",
     )
-    parser.add_argument("--generate_animations", type=bool, default=1, metavar="", help="Generate graph animations")
+    parser.add_argument("--generate_animations", type=int, default=1, metavar="", help="Generate graph animations")
     parser.add_argument("--layout", type=str, default="random_fixed", metavar="", help="Layout: random_fixed shell, spectral, spring, kamada_kawai, planar")
     args = parser.parse_args()
 
@@ -34,7 +34,9 @@ if __name__ == "__main__":
     print("\nSeed: ", config["seed"])
     print("Env seed: ", config["env_seed"])
 
-    solution_best = np.load(path + "/" + "solution_best.npy")
+    solution_best = np.load(path + "/" + "solution_best.npy", allow_pickle=True)
+    if solution_best.dtype == object:  # NEAT saves an Individual, CMA-ES saves a vector of numbers
+        solution_best = solution_best.item()
     config["layout"] = args.layout
     config["nb_episode_evals"] = 1
     config["nb_growth_evals"] = args.rollouts
@@ -46,4 +48,5 @@ if __name__ == "__main__":
         if "Network" not in config["environment"]:
             print(f"\nGenerating rollout visualisations")
             visualise_graph(solution_best, config, "REVAL: Information propagation during rollout — Best solution", env_rollout=True, logtocloud=False)
-    print(f"\nSumcheck best: {np.sum(solution_best)}")
+    if isinstance(solution_best, np.ndarray):
+        print(f"\nSumcheck best: {np.sum(solution_best)}")

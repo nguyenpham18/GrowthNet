@@ -69,7 +69,7 @@ recurrent_activation_function: "tanh" #  null
 ############################
 # Training hyperparameters #
 ############################
-optimizer: NEAT
+optimizer: CMAES
 maximise: True
 sigma_init: 1
 generations: 1000
@@ -107,3 +107,6 @@ neat_generations: 427        # 150 x 427 = ~64,000 evaluations, same budget as C
 neat_species_threshold: 3.0  # summed distance over the 3 rules
 neat_stop_when_solved: False # False = use the whole budget, like their CMA-ES
 neat_solved_fitness: 4       # only used if neat_stop_when_solved is True
+
+# ---- Starting network ----
+initial_graph: embryo        # "embryo" = 2 inputs, 1 hidden, 2 outputs, self-loops; leave out for 1 seed node

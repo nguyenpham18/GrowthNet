@@ -199,40 +199,40 @@ def fitness_functional(config: dict, render=False, animate_graph_growth=False, a
                     bias=config["mlp_weight_values_bias"],
                 )
 
-                if config["optimizer"] == "NEAT":
+            if config["optimizer"] == "NEAT":
                 # NEAT: the 3 rules are NEAT networks instead of MLPs filled with evolved numbers
-                    mlp_growth_model, mlp_feature_transformation, mlp_weight_values = rule_nets(evolved_parameters, config)
-                else:
+                mlp_growth_model, mlp_feature_transformation, mlp_weight_values = rule_nets(evolved_parameters, config)
+            else:
                 # Create indeces for unpaacking the evolved parameters
-                    n1 = config["nb_params_coevolve_initial_embeddings"]  # = embedding size with 1 seed node; more with an embryo
-                    n2 = n1 + config["nb_params_growth_model"]
-                    n3 = n2 + config["nb_params_feature_transformation"]
-                    n4 = n3 + config["nb_params_mlp_weight_values"]
+                n1 = config["nb_params_coevolve_initial_embeddings"]  # = embedding size with 1 seed node; more with an embryo
+                n2 = n1 + config["nb_params_growth_model"]
+                n3 = n2 + config["nb_params_feature_transformation"]
+                n4 = n3 + config["nb_params_mlp_weight_values"]
 
-                    # Load evolved weights into the growth-decision network
-                    torch.nn.utils.vector_to_parameters(torch.tensor(evolved_parameters[n1:n2], dtype=torch.float64, requires_grad=False), mlp_growth_model.parameters())
+                # Load evolved weights into the growth-decision network
+                torch.nn.utils.vector_to_parameters(torch.tensor(evolved_parameters[n1:n2], dtype=torch.float64, requires_grad=False), mlp_growth_model.parameters())
 
-                    # Load evolved weights into network that updates the node embeddings
-                    if config["NN_transform_node_embedding_during_growth"]:
-                        torch.nn.utils.vector_to_parameters(
-                            torch.tensor(
-                                evolved_parameters[n2:n3],
-                                dtype=torch.float64,
-                                requires_grad=False,
-                            ),
-                            mlp_feature_transformation.parameters(),
-                        )
+                # Load evolved weights into network that updates the node embeddings
+                if config["NN_transform_node_embedding_during_growth"]:
+                    torch.nn.utils.vector_to_parameters(
+                        torch.tensor(
+                            evolved_parameters[n2:n3],
+                            dtype=torch.float64,
+                            requires_grad=False,
+                        ),
+                        mlp_feature_transformation.parameters(),
+                    )
 
-                    # Load evolved weights into network that dermines weights based on pair of node embeddings for node-based-growth with non-binary connectivity
-                    if config["node_based_growth"] and not config["binary_connectivity"]:
-                        torch.nn.utils.vector_to_parameters(
-                            torch.tensor(
-                                evolved_parameters[n3:n4],
-                                dtype=torch.float64,
-                                requires_grad=False,
-                            ),
-                            mlp_weight_values.parameters(),
-                        )
+                # Load evolved weights into network that dermines weights based on pair of node embeddings for node-based-growth with non-binary connectivity
+                if config["node_based_growth"] and not config["binary_connectivity"]:
+                    torch.nn.utils.vector_to_parameters(
+                        torch.tensor(
+                            evolved_parameters[n3:n4],
+                            dtype=torch.float64,
+                            requires_grad=False,
+                        ),
+                        mlp_weight_values.parameters(),
+                    )
             network_state = copy.deepcopy(initial_network_state)
             obs_action_dim_tuple = None if "Network" in config["environment"] else (2, 2) if "gate" in config["environment"] else (config["observation_dim"], config["action_dim"])
 
@@ -438,7 +438,9 @@ def fitness_functional(config: dict, render=False, animate_graph_growth=False, a
 
 def bool_gates_fitness(G: nx.Graph, config: dict, render=False, animate_graph_rollout: bool = False):
     """
-    Returns a scalar measure of how many elements of the boolean gate truth table are correctly predicted by the graph G.
+    Scores the graph G on the boolean gate truth table.
+    Default: sum over the 4 inputs of the softmax probability given to the correct output (ties earn 0.5, not a free point).
+    config["gate_metric"] == "accuracy": number of inputs where the correct output is bigger by more than 1e-6 (ties are wrong).
     """
     # Truth table
     if config["environment"] == "XOR_gate":
@@ -473,7 +475,8 @@ def bool_gates_fitness(G: nx.Graph, config: dict, render=False, animate_graph_ro
     network_state = np.zeros(policy_connectivity.shape[0])
     network_thinking_time = diameter + config["network_thinking_time_extra_rollout"]
     timestep = 0
-    fitness = 0
+    softmax_score = 0
+    accuracy = 0
     for idx, x in enumerate(X):
         # Visualise the network's information flow
         if animate_graph_rollout:
@@ -508,16 +511,16 @@ def bool_gates_fitness(G: nx.Graph, config: dict, render=False, animate_graph_ro
         # Select action from the output nodes
         # Embryo: outputs are the embryo's fixed output nodes (new nodes are added at the end)
         output_values = network_state[config["output_nodes"]] if config.get("initial_graph") == "embryo" else network_state[-2:]
-        bool_prediction = np.argmax(output_values)
-
-        if bool_prediction == Y[idx]:
-            fitness += 1
+        probabilities = np.exp(output_values - np.max(output_values))
+        probabilities /= probabilities.sum()
+        softmax_score += probabilities[Y[idx]]
+        accuracy += output_values[Y[idx]] - output_values[1 - Y[idx]] > 1e-6
 
         timestep += 1
 
     if render:
-        print(f"{config['environment']} gate fitness: {fitness}")
-    return fitness
+        print(f"{config['environment']} gate softmax score: {softmax_score:.4f} / 4 | correct (ties count as wrong): {accuracy} / 4")
+    return accuracy if config.get("gate_metric") == "accuracy" else softmax_score
 
 
 def small_world_ness_fitness(G: nx.Graph, niter=5, nrand=10, seed=None, sigma=True, omega=False, render=False):

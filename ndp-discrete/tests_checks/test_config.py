@@ -63,7 +63,14 @@ def coevolve_initial_embeddings_2(config):
             raise NotImplementedError("coevolve_initial_embeddings is not implemented for extra_nodes != -1")
 
 
+def discrete_node_state(config):
+    if config.get("node_state") == "discrete":
+        assert config["node_based_growth"], "discrete node_state only supports node_based_growth"
+        assert not config["binary_connectivity"], "discrete node_state needs weighted edges (binary_connectivity: False)"
+
+
 def all_config_checks(config):
+    discrete_node_state(config)
     growth_mode(config)
     random_seed_and_reval(config)
     test_embedding_shared_graph(config)
